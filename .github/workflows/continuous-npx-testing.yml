@@ -1,0 +1,198 @@
+name: Continuous NPX Testing - Recursive Until Success
+on:
+  workflow_dispatch:
+    inputs:
+      test_iteration:
+        description: 'Testing iteration number'
+        required: true
+        default: '1'
+
+jobs:
+  # Test Method 1: Pre-install Claude globally
+  pre-install-test:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      success: ${{ steps.test.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Pre-install Claude Code
+        continue-on-error: true
+        run: |
+          echo "=== Pre-install Method Test ===" > pre-install-log.txt
+
+          # Multiple installation approaches
+          nix-shell -p nodejs npm --run 'npm config set prefix ~/.npm-global' || echo "Config set failed" >> pre-install-log.txt
+          nix-shell -p nodejs npm --run 'export PATH=~/.npm-global/bin:$PATH && npm install -g @anthropic-ai/claude-code' || echo "Global install failed" >> pre-install-log.txt
+
+      - name: Test Pre-installed NPX
+        id: test
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          export PATH=~/.npm-global/bin:$PATH
+
+          if cd ~ && nix-shell -p nodejs expect --run 'expect -c "
+            set timeout 180
+            spawn npx @anthropic-ai/claude-code --dangerously-skip-permissions \"Simple network analysis test\"
+            expect { -re {.*bypass permissions.*} { send \"2\r\" } }
+            expect { -re {.*Write.*|.*analysis.*} { exit 0 } timeout { exit 1 } }
+          "'; then
+            echo "✅ Pre-install NPX: SUCCESS" >> pre-install-log.txt
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Pre-install NPX: FAILED" >> pre-install-log.txt
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Pre-install Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pre-install-test-iter-${{ github.event.inputs.test_iteration }}
+          path: |
+            pre-install-log.txt
+
+  # Test Method 2: Direct NPX without global install
+  direct-npx-test:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      success: ${{ steps.test.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Test Direct NPX
+        id: test
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "=== Direct NPX Method Test ===" > direct-npx-log.txt
+
+          if cd ~ && nix-shell -p nodejs expect --run 'expect -c "
+            set timeout 180
+            spawn npx @anthropic-ai/claude-code --dangerously-skip-permissions \"Simple test task\"
+            expect { -re {.*bypass permissions.*} { send \"2\r\" } }
+            expect { -re {.*Write.*|.*analysis.*} { exit 0 } timeout { exit 1 } }
+          "'; then
+            echo "✅ Direct NPX: SUCCESS" >> direct-npx-log.txt
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Direct NPX: FAILED" >> direct-npx-log.txt
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Direct NPX Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: direct-npx-test-iter-${{ github.event.inputs.test_iteration }}
+          path: |
+            direct-npx-log.txt
+
+  # Test Method 3: Container-based approach
+  container-npx-test:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      success: ${{ steps.test.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test Container NPX
+        id: test
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "=== Container NPX Method Test ===" > container-npx-log.txt
+
+          # Use Docker to run Claude Code
+          if docker run --rm -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" node:20 bash -c "
+            npm install -g @anthropic-ai/claude-code
+            echo 'Simple container test' | npx @anthropic-ai/claude-code --dangerously-skip-permissions
+          " >> container-npx-log.txt 2>&1; then
+            echo "✅ Container NPX: SUCCESS" >> container-npx-log.txt
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Container NPX: FAILED" >> container-npx-log.txt
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Container Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: container-npx-test-iter-${{ github.event.inputs.test_iteration }}
+          path: |
+            container-npx-log.txt
+
+  # Analysis and Next Iteration
+  test-analysis:
+    needs: [pre-install-test, direct-npx-test, container-npx-test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Download All Test Results
+        uses: actions/download-artifact@v4
+        with:
+          path: npx-test-results/
+
+      - name: Analyze NPX Testing Results
+        run: |
+          echo "=== NPX Testing Analysis - Iteration ${{ github.event.inputs.test_iteration }} ===" > npx-analysis.txt
+          echo "" >> npx-analysis.txt
+
+          # Check success rates
+          echo "## Method Success Analysis ##" >> npx-analysis.txt
+
+          if [ "${{ needs.pre-install-test.outputs.success }}" = "true" ]; then
+            echo "✅ Pre-install method: SUCCESS" >> npx-analysis.txt
+            WORKING_METHOD="pre-install"
+          else
+            echo "❌ Pre-install method: FAILED" >> npx-analysis.txt
+          fi
+
+          if [ "${{ needs.direct-npx-test.outputs.success }}" = "true" ]; then
+            echo "✅ Direct NPX method: SUCCESS" >> npx-analysis.txt
+            WORKING_METHOD="direct-npx"
+          else
+            echo "❌ Direct NPX method: FAILED" >> npx-analysis.txt
+          fi
+
+          if [ "${{ needs.container-npx-test.outputs.success }}" = "true" ]; then
+            echo "✅ Container method: SUCCESS" >> npx-analysis.txt
+            WORKING_METHOD="container"
+          else
+            echo "❌ Container method: FAILED" >> npx-analysis.txt
+          fi
+
+          echo "" >> npx-analysis.txt
+          echo "## Recommended Approach ##" >> npx-analysis.txt
+
+          if [ -n "$WORKING_METHOD" ]; then
+            echo "🎯 SUCCESS: $WORKING_METHOD method working" >> npx-analysis.txt
+            echo "Next action: Deploy $WORKING_METHOD across all repositories" >> npx-analysis.txt
+          else
+            echo "⚠️ ALL METHODS FAILED: Need alternative approach" >> npx-analysis.txt
+            echo "Next action: Research additional NPX installation methods" >> npx-analysis.txt
+          fi
+
+          # Count total test artifacts
+          TOTAL_TESTS=$(find npx-test-results/ -name "*.txt" | wc -l)
+          echo "Total test artifacts: $TOTAL_TESTS" >> npx-analysis.txt
+
+      - name: Upload NPX Analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: npx-analysis-iter-${{ github.event.inputs.test_iteration }}
+          path: |
+            npx-analysis.txt
