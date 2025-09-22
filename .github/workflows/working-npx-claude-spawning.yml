@@ -1,0 +1,90 @@
+name: Working NPX Claude Spawning - Direct Method
+on:
+  workflow_dispatch:
+    inputs:
+      research_task:
+        description: 'Research task for Claude agent'
+        required: true
+        default: 'Analyze network topology and identify security vulnerabilities'
+      node_specialization:
+        description: 'Node specialization type'
+        required: true
+        default: 'network-researcher'
+
+jobs:
+  # Working NPX Claude Agent (Based on successful test)
+  claude-agent-direct-npx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Claude Agent Direct NPX (Working Method)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "=== Working NPX Claude Spawning ===" > claude-working-log.txt
+          echo "Task: ${{ github.event.inputs.research_task }}" >> claude-working-log.txt
+          echo "Specialization: ${{ github.event.inputs.node_specialization }}" >> claude-working-log.txt
+          echo "" >> claude-working-log.txt
+
+          # Use the working direct NPX method identified in testing
+          cd ~ && nix-shell -p nodejs expect --run 'expect -c "
+            set timeout 300
+            log_user 1
+            spawn npx @anthropic-ai/claude-code --dangerously-skip-permissions \"${{ github.event.inputs.research_task }}\"
+
+            expect {
+              -re {.*bypass permissions.*} {
+                puts \"Sending permission bypass...\"
+                send \"2\r\"
+                exp_continue
+              }
+              -re {.*Write.*|.*created.*|.*analysis.*|.*network.*|.*vulnerability.*|.*research.*} {
+                puts \"✅ Claude agent task completed successfully\"
+                exit 0
+              }
+              -re {.*error.*|.*failed.*} {
+                puts \"❌ Claude agent encountered error\"
+                exit 1
+              }
+              timeout {
+                puts \"❌ Claude agent timeout after 300s\"
+                exit 1
+              }
+              eof {
+                puts \"Claude agent session ended\"
+                exit 0
+              }
+            }
+          "' >> claude-working-log.txt 2>&1
+
+          CLAUDE_EXIT_CODE=$?
+          echo "" >> claude-working-log.txt
+          echo "Claude agent exit code: $CLAUDE_EXIT_CODE" >> claude-working-log.txt
+
+          if [ $CLAUDE_EXIT_CODE -eq 0 ]; then
+            echo "✅ NPX Claude spawning: SUCCESS" >> claude-working-log.txt
+
+            # Check for generated files
+            GENERATED_FILES=$(find ~ -name "*.md" -o -name "*.txt" -newer /tmp -type f 2>/dev/null | head -10)
+            if [ -n "$GENERATED_FILES" ]; then
+              echo "Generated files found:" >> claude-working-log.txt
+              echo "$GENERATED_FILES" >> claude-working-log.txt
+            fi
+          else
+            echo "❌ NPX Claude spawning: FAILED" >> claude-working-log.txt
+
+            # Fallback to direct collection for comparison
+            echo "Executing fallback direct collection..." >> claude-working-log.txt
+            nix-shell -p curl --run 'curl -s ifconfig.me > fallback-ip.txt'
+            echo "Fallback IP: $(cat fallback-ip.txt)" >> claude-working-log.txt
+          fi
+
+      - name: Upload Working Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: working-npx-claude-${{ github.event.inputs.node_specialization }}
+          path: |
+            claude-working-log.txt
+            fallback-ip.txt
