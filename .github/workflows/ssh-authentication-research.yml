@@ -1,0 +1,204 @@
+name: SSH Authentication Research and Bypass Testing
+on:
+  workflow_dispatch:
+    inputs:
+      target_host:
+        description: 'Target SSH host'
+        required: true
+        default: '10.8.0.10'
+      research_mode:
+        description: 'Research mode'
+        required: true
+        default: 'comprehensive'
+        type: choice
+        options:
+        - comprehensive
+        - vulnerability-only
+        - credential-only
+
+jobs:
+  # SSH Vulnerability Research
+  ssh-vulnerability-research:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: SSH Service Enumeration
+        run: |
+          # Following .claude nix-shell patterns
+          nix-shell -p nmap --run 'nmap -sV -p 22 ${{ github.event.inputs.target_host }} > ssh-service-version.txt'
+          nix-shell -p nmap --run 'nmap --script ssh2-enum-algos ${{ github.event.inputs.target_host }} > ssh-algorithms.txt'
+          nix-shell -p nmap --run 'nmap --script ssh-hostkey ${{ github.event.inputs.target_host }} > ssh-hostkeys.txt'
+
+      - name: LibSSH Vulnerability Check (CVE-2018-10933)
+        run: |
+          # Test for libssh authentication bypass
+          nix-shell -p nmap --run 'nmap --script ssh-auth-methods ${{ github.event.inputs.target_host }} > ssh-auth-methods.txt'
+          nix-shell -p python3 --run 'python3 -c "
+import socket
+try:
+    s = socket.socket()
+    s.connect((\"${{ github.event.inputs.target_host }}\", 22))
+    banner = s.recv(1024).decode()
+    print(f\"SSH Banner: {banner}\")
+    with open(\"ssh-banner.txt\", \"w\") as f:
+        f.write(banner)
+    s.close()
+except Exception as e:
+    print(f\"Error: {e}\")
+    with open(\"ssh-banner.txt\", \"w\") as f:
+        f.write(f\"Connection failed: {e}\")
+"'
+
+      - name: SSH Configuration Analysis
+        run: |
+          # Research common SSH misconfigurations
+          nix-shell -p curl --run 'curl -s "https://api.github.com/search/repositories?q=ssh+misconfiguration" > ssh-misconfig-research.txt'
+
+          # Test SSH connection with verbose output
+          nix-shell -p openssh --run 'timeout 10 ssh -v -o ConnectTimeout=5 -o PasswordAuthentication=no test@${{ github.event.inputs.target_host }} 2>&1 | head -50 > ssh-connection-test.txt || true'
+
+      - name: Upload SSH Research Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-research-${{ github.event.inputs.target_host }}
+          path: |
+            ssh-*.txt
+
+  # Credential Research Branch
+  credential-research:
+    runs-on: ubuntu-latest
+    if: contains(github.event.inputs.research_mode, 'credential') || github.event.inputs.research_mode == 'comprehensive'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Default Credential Research
+        run: |
+          # Research default credentials for VPN systems
+          nix-shell -p curl --run 'curl -s "https://api.github.com/search/repositories?q=default+vpn+credentials" > vpn-default-creds.txt'
+          nix-shell -p curl --run 'curl -s "https://api.github.com/search/repositories?q=openvpn+default+users" > openvpn-users.txt'
+
+          # Create credential wordlist based on VPN context
+          echo "root" > credential-wordlist.txt
+          echo "admin" >> credential-wordlist.txt
+          echo "vpnuser" >> credential-wordlist.txt
+          echo "openvpn" >> credential-wordlist.txt
+          echo "dm" >> credential-wordlist.txt
+          echo "user" >> credential-wordlist.txt
+
+      - name: SSH Key Research
+        run: |
+          # Generate test SSH keys for key-based auth testing
+          nix-shell -p openssh --run 'ssh-keygen -t ed25519 -f test_ed25519 -N ""'
+          nix-shell -p openssh --run 'ssh-keygen -t rsa -b 2048 -f test_rsa -N ""'
+
+          # Research SSH key bypass techniques
+          nix-shell -p curl --run 'curl -s "https://api.github.com/search/repositories?q=ssh+key+bypass" > ssh-key-bypass.txt'
+
+      - name: Upload Credential Research
+        uses: actions/upload-artifact@v4
+        with:
+          name: credential-research
+          path: |
+            credential-wordlist.txt
+            vpn-default-creds.txt
+            openvpn-users.txt
+            ssh-key-bypass.txt
+            test_ed25519*
+            test_rsa*
+
+  # Authentication Bypass Testing
+  auth-bypass-testing:
+    needs: [ssh-vulnerability-research, credential-research]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Download Research Results
+        uses: actions/download-artifact@v4
+        with:
+          path: research/
+
+      - name: SSH Authentication Bypass Attempts
+        run: |
+          # Test various authentication bypass techniques
+
+          # 1. Test for authentication bypass via malformed packets
+          nix-shell -p netcat --run 'echo "SSH-2.0-Test" | timeout 5 nc ${{ github.event.inputs.target_host }} 22 > auth-bypass-test1.txt || true'
+
+          # 2. Test SSH with different protocol versions
+          nix-shell -p openssh --run 'timeout 10 ssh -1 -o ConnectTimeout=5 test@${{ github.event.inputs.target_host }} 2>&1 > ssh-protocol-v1-test.txt || true'
+
+          # 3. Test SSH with various cipher combinations
+          nix-shell -p openssh --run 'timeout 10 ssh -o Ciphers=aes128-cbc -o ConnectTimeout=5 test@${{ github.event.inputs.target_host }} 2>&1 > ssh-cipher-test.txt || true'
+
+      - name: Alternative Authentication Methods
+        run: |
+          # Test alternative protocols that might be available
+          nix-shell -p netcat --run 'timeout 5 nc -v ${{ github.event.inputs.target_host }} 23 2>&1 > telnet-test.txt || true'
+          nix-shell -p netcat --run 'timeout 5 nc -v ${{ github.event.inputs.target_host }} 5900 2>&1 > vnc-test.txt || true'
+          nix-shell -p netcat --run 'timeout 5 nc -v ${{ github.event.inputs.target_host }} 3389 2>&1 > rdp-test.txt || true'
+
+      - name: Upload Bypass Test Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-bypass-results
+          path: |
+            auth-bypass-*.txt
+            ssh-*.txt
+            telnet-*.txt
+            vnc-*.txt
+            rdp-*.txt
+
+  # Results Analysis and Recommendations
+  results-analysis:
+    needs: [auth-bypass-testing]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Download All Results
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results/
+
+      - name: Analyze SSH Research Results
+        run: |
+          # Aggregate all research findings
+          echo "=== SSH Authentication Research Results ===" > ssh-analysis-report.txt
+          echo "Target: ${{ github.event.inputs.target_host }}" >> ssh-analysis-report.txt
+          echo "Date: $(date)" >> ssh-analysis-report.txt
+          echo "" >> ssh-analysis-report.txt
+
+          # Count total files generated
+          nix-shell -p coreutils --run 'find all-results/ -name "*.txt" | wc -l' > total-files.txt
+          echo "Total research files generated: $(cat total-files.txt)" >> ssh-analysis-report.txt
+
+          # Check for successful connections or vulnerabilities
+          if nix-shell -p gnugrep --run 'grep -r "success\|connected\|authenticated" all-results/ > successful-connections.txt'; then
+            echo "✅ Successful connections found - see successful-connections.txt" >> ssh-analysis-report.txt
+          else
+            echo "❌ No successful direct connections" >> ssh-analysis-report.txt
+          fi
+
+          # Generate next steps recommendations
+          echo "" >> ssh-analysis-report.txt
+          echo "=== Recommended Next Steps ===" >> ssh-analysis-report.txt
+          echo "1. Review SSH service version for known vulnerabilities" >> ssh-analysis-report.txt
+          echo "2. Test identified credential combinations" >> ssh-analysis-report.txt
+          echo "3. Investigate alternative access vectors" >> ssh-analysis-report.txt
+          echo "4. Consider social engineering approaches" >> ssh-analysis-report.txt
+
+      - name: Upload Final Analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-final-analysis
+          path: |
+            ssh-analysis-report.txt
+            total-files.txt
+            successful-connections.txt
